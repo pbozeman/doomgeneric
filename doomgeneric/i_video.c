@@ -132,6 +132,13 @@ typedef struct
 
 static uint16_t rgb565_palette[256];
 
+// Fast palette LUT: pre-computed pixel values indexed by palette entry.
+// Rebuilt by I_SetPalette whenever the palette changes.
+// For 32bpp: each entry is a uint32_t with R/G/B at the configured offsets.
+// For 16bpp: each entry is a uint16_t stored in the low half of a uint32_t.
+
+static uint32_t palette_lut[256];
+
 void cmap_to_rgb565(uint16_t * out, uint8_t * in, int in_pixels)
 {
     int i, j;
@@ -155,50 +162,49 @@ void cmap_to_rgb565(uint16_t * out, uint8_t * in, int in_pixels)
 
 void cmap_to_fb(uint8_t *out, uint8_t *in, int in_pixels)
 {
-    int i, k;
-    struct color c;
-    uint32_t pix;
+    int i;
 
-    for (i = 0; i < in_pixels; i++)
+    if (s_Fb.bits_per_pixel == 32)
     {
-        c = colors[*in];  // R:8 G:8 B:8
-
-        if (s_Fb.bits_per_pixel == 16)
+        uint32_t *out32 = (uint32_t *)out;
+        if (fb_scaling == 1)
         {
-            // RGB565 packing
-            uint16_t p = ((c.r & 0xF8) << 8) |
-                         ((c.g & 0xFC) << 3) |
-                         (c.b >> 3);
-
-#ifdef SYS_BIG_ENDIAN
-            p = swapeLE16(p); // can't use SHORT() because this needs to stay unsigned
-#endif
-            for (k = 0; k < fb_scaling; k++) {
-                *(uint16_t *)out = p;
-                out += 2;
+            for (i = 0; i < in_pixels; i++)
+                out32[i] = palette_lut[in[i]];
+        }
+        else
+        {
+            int k;
+            for (i = 0; i < in_pixels; i++)
+            {
+                uint32_t pix = palette_lut[*in++];
+                for (k = 0; k < fb_scaling; k++)
+                    *out32++ = pix;
             }
         }
-        else if (s_Fb.bits_per_pixel == 32)
+    }
+    else if (s_Fb.bits_per_pixel == 16)
+    {
+        uint16_t *out16 = (uint16_t *)out;
+        if (fb_scaling == 1)
         {
-            // Assuming RGBA8888
-            pix = (c.r << s_Fb.red.offset) |
-                  (c.g << s_Fb.green.offset) |
-                  (c.b << s_Fb.blue.offset);
-
-#ifdef SYS_BIG_ENDIAN
-            pix = swapLE32(pix);
-#endif
-            for (k = 0; k < fb_scaling; k++) {
-                *(uint32_t *)out = pix;
-                out += 4;
+            for (i = 0; i < in_pixels; i++)
+                out16[i] = (uint16_t)palette_lut[in[i]];
+        }
+        else
+        {
+            int k;
+            for (i = 0; i < in_pixels; i++)
+            {
+                uint16_t pix = (uint16_t)palette_lut[*in++];
+                for (k = 0; k < fb_scaling; k++)
+                    *out16++ = pix;
             }
         }
-        else {
-            // no clue how to convert this
-            I_Error("No idea how to convert %d bpp pixels", s_Fb.bits_per_pixel);
-        }
-
-        in++;
+    }
+    else
+    {
+        I_Error("cmap_to_fb: unsupported %d bpp", s_Fb.bits_per_pixel);
     }
 }
 
@@ -410,6 +416,28 @@ void I_SetPalette (byte* palette)
         colors[i].r = gammatable[usegamma][*palette++];
         colors[i].g = gammatable[usegamma][*palette++];
         colors[i].b = gammatable[usegamma][*palette++];
+
+        // Pre-compute pixel value for fast cmap_to_fb lookup
+        if (s_Fb.bits_per_pixel == 32)
+        {
+            uint32_t pix = ((uint32_t)colors[i].r << s_Fb.red.offset) |
+                           ((uint32_t)colors[i].g << s_Fb.green.offset) |
+                           ((uint32_t)colors[i].b << s_Fb.blue.offset);
+#ifdef SYS_BIG_ENDIAN
+            pix = swapLE32(pix);
+#endif
+            palette_lut[i] = pix;
+        }
+        else if (s_Fb.bits_per_pixel == 16)
+        {
+            uint16_t pix = ((colors[i].r & 0xF8) << 8) |
+                           ((colors[i].g & 0xFC) << 3) |
+                           (colors[i].b >> 3);
+#ifdef SYS_BIG_ENDIAN
+            pix = swapLE16(pix);
+#endif
+            palette_lut[i] = pix;
+        }
     }
 
 #ifdef CMAP256
